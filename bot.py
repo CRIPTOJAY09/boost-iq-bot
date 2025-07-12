@@ -1,132 +1,125 @@
+# bot.py
 import os
 import logging
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
+)
+from utils.bscscan import verify_transaction
+from datetime import datetime, timedelta
 
-# Cargar variables de entorno
+# Load env variables
 load_dotenv()
 
-# Configurar logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY")
+OWNER_ID = int(os.getenv("OWNER_ID"))
+BEP20_WALLET = os.getenv("BEP20_WALLET")
+USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
+GROUP_LINKS = {
+    "starter": os.getenv("GROUP_STARTER"),
+    "pro": os.getenv("GROUP_PRO"),
+    "ultimate": os.getenv("GROUP_ULTIMATE"),
+}
+PLAN_PRICES = {
+    "starter": 9.99,
+    "pro": 19.99,
+    "ultimate": 29.99
+}
 
-# Obtener el token del bot desde las variables de entorno
-BOT_TOKEN = os.getenv('BOT_TOKEN')
+logging.basicConfig(level=logging.INFO)
+user_data = {}
+paid_users = {}  # {user_id: expiry_date}
 
-# Verificar que el token existe
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN no encontrado en las variables de entorno")
-
-# Comando /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envía un mensaje cuando se usa el comando /start"""
-    user = update.effective_user
-    await update.message.reply_html(
-        f"¡Hola {user.mention_html()}! Soy tu bot de Telegram.\n"
-        f"Usa /help para ver los comandos disponibles."
+    keyboard = [[
+        InlineKeyboardButton("🇺🇸 English", callback_data="lang_en"),
+        InlineKeyboardButton("🇪🇸 Español", callback_data="lang_es")
+    ]]
+    await update.message.reply_text("🌐 Select your language / Selecciona tu idioma:",
+                                    reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    lang = query.data.split('_')[1]
+    user_data[query.from_user.id] = {"lang": lang}
+
+    text = "✅ Choose your plan:" if lang == "en" else "✅ Elige tu plan:"
+    buttons = [
+        [InlineKeyboardButton("🔹 Starter", callback_data="plan_starter")],
+        [InlineKeyboardButton("🔸 Pro", callback_data="plan_pro")],
+        [InlineKeyboardButton("🔴 Ultimate", callback_data="plan_ultimate")],
+    ]
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(buttons))
+
+async def handle_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    plan = query.data.split('_')[1]
+    uid = query.from_user.id
+    user_data[uid]["plan"] = plan
+    lang = user_data[uid].get("lang", "en")
+    text = (
+        f"✅ Send your BEP20 hash to:
+`{BEP20_WALLET}`\n💸 Plan: {plan.capitalize()}"
+        if lang == "en"
+        else f"✅ Envía el hash de pago a:
+`{BEP20_WALLET}`\n💸 Plan: {plan.capitalize()}"
     )
+    await query.edit_message_text(text=text, parse_mode="Markdown")
 
-# Comando /help
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envía un mensaje de ayuda cuando se usa el comando /help"""
-    help_text = """
-🤖 *Comandos disponibles:*
+async def handle_hash(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.message.from_user.id
+    username = update.message.from_user.username or "User"
+    hash_code = update.message.text.strip()
 
-/start - Iniciar el bot
-/help - Mostrar esta ayuda
-/echo - Repetir tu mensaje
-/info - Información sobre el bot
+    if uid not in user_data:
+        await update.message.reply_text("❗ Please start with /start.")
+        return
 
-📝 También puedes enviarme cualquier mensaje y te responderé.
-    """
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    plan = user_data[uid].get("plan", "starter")
+    lang = user_data[uid].get("lang", "en")
 
-# Comando /echo
-async def echo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Repite el mensaje del usuario"""
-    if context.args:
-        message = ' '.join(context.args)
-        await update.message.reply_text(f"📢 Echo: {message}")
-    else:
-        await update.message.reply_text("Uso: /echo <mensaje>")
+    await update.message.reply_text("🔍 Checking transaction...")
+    valid, amount = verify_transaction(hash_code, BEP20_WALLET, USDT_CONTRACT, BSCSCAN_API_KEY)
+    required = PLAN_PRICES[plan]
+    lower_bound = required * 0.95
 
-# Comando /info
-async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra información sobre el bot"""
-    info_text = """
-ℹ️ *Información del Bot*
-
-🤖 Nombre: Mi Bot de Telegram
-🔧 Versión: 1.0
-📊 Estado: Activo
-🐍 Python: 3.12
-📚 Librería: python-telegram-bot
-
-¡Gracias por usar el bot! 🎉
-    """
-    await update.message.reply_text(info_text, parse_mode='Markdown')
-
-# Manejador de mensajes de texto
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los mensajes de texto regulares"""
-    message_text = update.message.text.lower()
-    
-    # Respuestas simples basadas en palabras clave
-    if "hola" in message_text or "hi" in message_text:
-        await update.message.reply_text("¡Hola! 👋 ¿Cómo estás?")
-    elif "adiós" in message_text or "bye" in message_text:
-        await update.message.reply_text("¡Hasta luego! 👋")
-    elif "gracias" in message_text or "thanks" in message_text:
-        await update.message.reply_text("¡De nada! 😊")
-    elif "cómo estás" in message_text or "how are you" in message_text:
-        await update.message.reply_text("¡Estoy bien, gracias por preguntar! 🤖")
-    else:
-        await update.message.reply_text(f"Recibí tu mensaje: '{update.message.text}'\n¡Gracias por escribir! 💬")
-
-# Manejador de errores
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los errores que ocurren durante la ejecución"""
-    logger.error(f"Error en el bot: {context.error}")
-    
-    # Si el error ocurre durante una actualización, intentar responder al usuario
-    if isinstance(update, Update) and update.effective_message:
-        await update.effective_message.reply_text(
-            "❌ Ocurrió un error procesando tu mensaje. Intenta de nuevo más tarde."
+    if valid and amount >= lower_bound:
+        expiry = datetime.utcnow() + timedelta(days=7)
+        paid_users[uid] = expiry
+        await update.message.reply_text(
+            f"✅ Payment verified! Access your group: {GROUP_LINKS[plan]}"
         )
+        await context.bot.send_message(chat_id=OWNER_ID,
+            text=f"💸 @{username} paid for {plan.upper()} ({amount:.2f} USDT)")
+    else:
+        await update.message.reply_text("❌ Payment not valid or too low.")
 
+# Scheduled check for expired users (dummy placeholder)
+async def expire_check(app: Application):
+    now = datetime.utcnow()
+    for uid, expiry in list(paid_users.items()):
+        if expiry < now:
+            del paid_users[uid]
+            await app.bot.send_message(chat_id=uid, text="⛔ Your subscription expired.")
+
+# Main runner
 def main():
-    """Función principal del bot"""
-    try:
-        # Crear la aplicación
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # Registrar los manejadores de comandos
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("echo", echo_command))
-        application.add_handler(CommandHandler("info", info_command))
-        
-        # Registrar el manejador de mensajes de texto
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        # Registrar el manejador de errores
-        application.add_error_handler(error_handler)
-        
-        # Iniciar el bot
-        logger.info("Iniciando el bot...")
-        print("🤖 Bot iniciado correctamente. Presiona Ctrl+C para detener.")
-        
-        # Ejecutar el bot hasta que se presione Ctrl+C
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-        
-    except Exception as e:
-        logger.error(f"Error crítico: {e}")
-        print(f"❌ Error crítico: {e}")
-        print("Verifica tu token y configuración.")
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_lang, pattern="^lang_"))
+    app.add_handler(CallbackQueryHandler(handle_plan, pattern="^plan_"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_hash))
+
+    app.job_queue.run_repeating(lambda _: expire_check(app), interval=3600, first=10)
+
+    logging.info("🚀 BoostIQ Bot ready")
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
