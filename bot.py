@@ -1,4 +1,3 @@
-
 import os
 import time
 import logging
@@ -33,6 +32,7 @@ def verify_tx(hash_code):
                 return True
     return False
 
+# Comando /start
 async def start(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton("🇺🇸 English", callback_data='lang_en'),
@@ -40,15 +40,13 @@ async def start(update: Update, context: CallbackContext):
     ]
     await update.message.reply_text("🌐 Select your language / Selecciona tu idioma:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+# Selección de idioma
 async def language_selection(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     lang = query.data.split("_")[1]
     user_data[query.from_user.id] = {"lang": lang}
-    if lang == "en":
-        text = "✅ Choose your plan:"
-    else:
-        text = "✅ Elige tu plan:"
+    text = "✅ Choose your plan:" if lang == "en" else "✅ Elige tu plan:"
     buttons = [
         [InlineKeyboardButton("🔹 Starter", callback_data='plan_starter')],
         [InlineKeyboardButton("🔸 Pro", callback_data='plan_pro')],
@@ -56,6 +54,7 @@ async def language_selection(update: Update, context: CallbackContext):
     ]
     await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(buttons))
 
+# Selección de plan
 async def plan_selection(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
@@ -63,40 +62,56 @@ async def plan_selection(update: Update, context: CallbackContext):
     uid = query.from_user.id
     lang = user_data.get(uid, {}).get("lang", "en")
     user_data[uid]["plan"] = plan
-    msg = (
-        f"✅ Send the hash of your payment to this BEP20 wallet:
-`{BEP20_WALLET}`"
-        if lang == "en" else
-        f"✅ Envía el hash de tu pago a esta wallet BEP20:
-`{BEP20_WALLET}`"
-    )
+
+    if lang == "en":
+        msg = (
+            f"✅ Send the hash of your payment to this BEP20 wallet:\n"
+            f"`{BEP20_WALLET}`\n\n"
+            "⏳ We’ll verify it and grant access once confirmed."
+        )
+    else:
+        msg = (
+            f"✅ Envía el hash de tu pago a esta wallet BEP20:\n"
+            f"`{BEP20_WALLET}`\n\n"
+            "⏳ Verificaremos tu transacción y te daremos acceso al grupo."
+        )
+
     await query.edit_message_text(msg, parse_mode='Markdown')
 
+# Manejo del hash enviado por el usuario
 async def handle_hash(update: Update, context: CallbackContext):
     uid = update.message.from_user.id
     hash_code = update.message.text.strip()
+
     if len(hash_code) != 66 or not hash_code.startswith("0x"):
-        await update.message.reply_text("❌ Invalid transaction hash.")
+        await update.message.reply_text("❌ Invalid transaction hash." if user_data.get(uid, {}).get("lang") == "en"
+                                        else "❌ Hash de transacción inválido.")
         return
 
-    await update.message.reply_text("🔎 Verifying your payment on BscScan...")
+    await update.message.reply_text("🔎 Verifying your payment on BscScan..." if user_data.get(uid, {}).get("lang") == "en"
+                                    else "🔎 Verificando tu pago en BscScan...")
+
     if verify_tx(hash_code):
         plan = user_data.get(uid, {}).get("plan", "starter")
-        await update.message.reply_text(
-            f"✅ Payment verified! Join your private group:
-{GROUP_LINKS[plan]}"
+        msg = (
+            f"✅ Payment verified! Join your private group:\n{GROUP_LINKS[plan]}"
+            if user_data.get(uid, {}).get("lang") == "en"
+            else f"✅ Pago verificado. Únete a tu grupo privado:\n{GROUP_LINKS[plan]}"
         )
-        context.bot.send_message(chat_id=OWNER_ID, text=f"💸 New payment from @{update.message.from_user.username or 'User'} for {plan} plan.")
+        await update.message.reply_text(msg)
+        context.bot.send_message(chat_id=OWNER_ID, text=f"💸 Nuevo pago confirmado de @{update.message.from_user.username or 'User'} para el plan *{plan}*.", parse_mode='Markdown')
     else:
-        await update.message.reply_text("❌ Payment not found or not confirmed.")
+        await update.message.reply_text("❌ Payment not found or not confirmed." if user_data.get(uid, {}).get("lang") == "en"
+                                        else "❌ No se encontró el pago o no está confirmado.")
 
+# Ejecución principal del bot
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(language_selection, pattern="^lang_"))
     app.add_handler(CallbackQueryHandler(plan_selection, pattern="^plan_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_hash))
-    print("🚀 BoostIQ Bot ready.")
+    print("🚀 BoostIQ Bot listo y escuchando.")
     app.run_polling()
 
 if __name__ == '__main__':
