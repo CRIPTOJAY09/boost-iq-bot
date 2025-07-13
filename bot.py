@@ -1,28 +1,52 @@
-
 import os
 import logging
-import asyncio
 import requests
-from dotenv import load_dotenv
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
 )
-from datetime import datetime, timedelta
+from dotenv import load_dotenv
 import json
-from aiohttp import web
 
-# Load env variables
+# Configuración de logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Cargar variables de entorno
 load_dotenv()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID")) if os.getenv("OWNER_ID") else None
 BEP20_WALLET = os.getenv("BEP20_WALLET")
-ALERT_SECRET = os.getenv("ALERT_SECRET")
 USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
 
+# IDs de los grupos (para invitar y expulsar usuarios)
+GROUP_CHAT_IDS = {
+    "starter": os.getenv("GROUP_CHAT_ID_STARTER"),
+    "pro": os.getenv("GROUP_CHAT_ID_PRO"),
+    "ultimate": os.getenv("GROUP_CHAT_ID_ULTIMATE"),
+}
+
+# Precios de los planes
+PLAN_PRICES = {
+    "starter": 9.99,
+    "pro": 19.99,
+    "ultimate": 29.99
+}
+
+# Duración de los planes en días
+PLAN_DURATIONS = {
+    "starter": 30,
+    "pro": 90,
+    "ultimate": 180
+}
+
+# Validar variables de entorno
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN no encontrado en las variables de entorno")
 if not BSCSCAN_API_KEY:
@@ -31,72 +55,184 @@ if not OWNER_ID:
     raise ValueError("OWNER_ID no encontrado en las variables de entorno")
 if not BEP20_WALLET:
     raise ValueError("BEP20_WALLET no encontrado en las variables de entorno")
+if not all(GROUP_CHAT_IDS.values()):
+    raise ValueError("Faltan GROUP_CHAT_ID_STARTER, GROUP_CHAT_ID_PRO o GROUP_CHAT_ID_ULTIMATE")
 
-GROUP_LINKS = {
-    "starter": os.getenv("GROUP_LINK_STARTER"),
-    "pro": os.getenv("GROUP_LINK_PRO"),
-    "ultimate": os.getenv("GROUP_LINK_ULTIMATE"),
-}
+# Archivo para almacenar suscripciones
+SUBSCRIPTIONS_FILE = "subscriptions.json"
 
-PLAN_PRICES = {
-    "starter": 9.99,
-    "pro": 19.99,
-    "ultimate": 29.99
-}
-
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-user_data = {}
-paid_users = {}
-
-# API de alertas
-
-async def alert_handler(request):
+# Cargar suscripciones desde archivo
+def load_subscriptions():
     try:
-        data = await request.json()
-        secret = data.get("secret")
-        message = data.get("message")
+        with open(SUBSCRIPTIONS_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
-        if secret != ALERT_SECRET:
-            return web.json_response({"error": "Unauthorized"}, status=401)
+# Guardar suscripciones en archivo
+def save_subscriptions(subscriptions):
+    with open(SUBSCRIPTIONS_FILE, "w") as f:
+        json.dump(subscriptions, f, indent=2)
 
-        if not message:
-            return web.json_response({"error": "No message provided"}, status=400)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Español 🇪🇸", callback_data="lang_es"),
+         InlineKeyboardButton("English 🇺🇸", callback_data="lang_en")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("¡Bienvenido a BoostIQ! Elige tu idioma:", reply_markup=reply_markup)
 
-        app = request.app["telegram_bot"]
-        await app.bot.send_message(chat_id=OWNER_ID, text=message)
-        return web.json_response({"status": "Message sent"})
+async def select_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    lang = query.data.split("_")[1]
+    context.user_data["language"] = lang
+    keyboard = [
+        [InlineKeyboardButton("Starter ($9.99)", callback_data="plan_starter"),
+         InlineKeyboardButton("Pro ($19.99)", callback_data="plan_pro")],
+        [InlineKeyboardButton("Ultimate ($29.99)", callback_data="plan_ultimate")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_text(
+        "Selecciona un plan:" if lang == "es" else "Select a plan:",
+        reply_markup=reply_markup
+    )
+
+async def select_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    plan = query.data.split("_")[1]
+    context.user_data["plan"] = plan
+    lang = context.user_data.get("language", "es")
+    price = PLAN_PRICES[plan]
+    await query.message.reply_text(
+        f"Has elegido el plan {plan.capitalize()} (${price}).\n"
+        f"Por favor, envía {price} USDT (BEP20) a esta dirección: `{BEP20_WALLET}`\n"
+        f"Una vez realizado el pago, envía el hash de la transacción."
+        if lang == "es" else
+        f"You've chosen the {plan.capitalize()} plan (${price}).\n"
+        f"Please send {price} USDT (BEP20) to this address: `{BEP20_WALLET}`\n"
+        f"Once the payment is made, send the transaction hash."
+    )
+
+async def verify_payment(tx_hash: str, plan: str) -> bool:
+    url = f"https://api.bscscan.com/api?module=transaction&action=gettxreceiptstatus&txhash={tx_hash}&apikey={BSCSCAN_API_KEY}"
+    try:
+        response = requests.get(url)
+        data = response.json()
+        if data.get("status") == "1":
+            # Verificar monto y dirección
+            tx_details = f"https://api.bscscan.com/api?module=account&action=tokentx&contractaddress={USDT_CONTRACT}&address={BEP20_WALLET}&apikey={BSCSCAN_API_KEY}"
+            tx_response = requests.get(tx_details)
+            tx_data = tx_response.json()
+            for tx in tx_data.get("result", []):
+                if tx["hash"] == tx_hash:
+                    amount = float(tx["value"]) / 10**18
+                    expected_amount = PLAN_PRICES.get(plan, 9.99)
+                    if abs(amount - expected_amount) < 0.01:  # Tolerancia para errores de redondeo
+                        return True
+            return False
+        return False
     except Exception as e:
-        logger.error(f"Error in alert_handler: {e}")
-        return web.json_response({"error": str(e)}, status=500)
+        logger.error(f"Error verificando pago: {e}")
+        return False
 
-# Main app
+async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tx_hash = update.message.text.strip()
+    lang = context.user_data.get("language", "es")
+    plan = context.user_data.get("plan", "starter")
+    
+    if await verify_payment(tx_hash, plan):
+        user_id = str(update.message.from_user.id)
+        subscriptions = load_subscriptions()
+        subscriptions[user_id] = {
+            "plan": plan,
+            "start_date": datetime.now().isoformat(),
+            "end_date": (datetime.now() + timedelta(days=PLAN_DURATIONS[plan])).isoformat()
+        }
+        save_subscriptions(subscriptions)
+        
+        group_chat_id = GROUP_CHAT_IDS.get(plan)
+        try:
+            await context.bot.invite_chat_member(group_chat_id, user_id)
+            await update.message.reply_text(
+                f"¡Pago verificado! Has sido añadido al grupo {plan.capitalize()}."
+                if lang == "es" else
+                f"Payment verified! You have been added to the {plan.capitalize()} group."
+            )
+            await context.bot.send_message(
+                OWNER_ID,
+                f"Nueva suscripción: {update.message.from_user.username} ({plan.capitalize()})"
+            )
+        except Exception as e:
+            logger.error(f"Error invitando usuario {user_id}: {e}")
+            await update.message.reply_text(
+                "Pago verificado, pero hubo un error al añadirte al grupo. Contacta al soporte."
+                if lang == "es" else
+                "Payment verified, but there was an error adding you to the group. Contact support."
+            )
+    else:
+        await update.message.reply_text(
+            "Pago no válido. Verifica el hash o contacta al soporte."
+            if lang == "es" else
+            "Invalid payment. Please check the hash or contact support."
+        )
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    subscriptions = load_subscriptions()
+    lang = context.user_data.get("language", "es")
+    if user_id in subscriptions:
+        plan = subscriptions[user_id]["plan"]
+        end_date = datetime.fromisoformat(subscriptions[user_id]["end_date"])
+        await update.message.reply_text(
+            f"Tu plan: {plan.capitalize()}\nExpira: {end_date.strftime('%Y-%m-%d')}"
+            if lang == "es" else
+            f"Your plan: {plan.capitalize()}\nExpires: {end_date.strftime('%Y-%m-%d')}"
+        )
+    else:
+        await update.message.reply_text(
+            "No tienes una suscripción activa." if lang == "es" else "You don't have an active subscription."
+        )
+
+async def check_subscriptions(context: ContextTypes.DEFAULT_TYPE):
+    subscriptions = load_subscriptions()
+    now = datetime.now()
+    for user_id, data in list(subscriptions.items()):
+        end_date = datetime.fromisoformat(data["end_date"])
+        if now > end_date:
+            plan = data["plan"]
+            group_chat_id = GROUP_CHAT_IDS.get(plan)
+            try:
+                await context.bot.ban_chat_member(group_chat_id, user_id)
+                await context.bot.send_message(
+                    OWNER_ID,
+                    f"Usuario {user_id} expulsado por suscripción expirada ({plan})."
+                )
+                del subscriptions[user_id]
+            except Exception as e:
+                logger.error(f"Error expulsando usuario {user_id}: {e}")
+    save_subscriptions(subscriptions)
 
 def main():
     try:
         app = Application.builder().token(BOT_TOKEN).build()
 
-        # Asegúrate de que los handlers estén registrados en tu versión extendida
+        # Handlers
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("status", status))
+        app.add_handler(CallbackQueryHandler(select_language, pattern="lang_.*"))
+        app.add_handler(CallbackQueryHandler(select_plan, pattern="plan_.*"))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_payment))
 
-        app.job_queue.run_repeating(lambda context: None, interval=3600, first=10)
+        # Tarea programada para verificar suscripciones (cada 24 horas)
+        app.job_queue.run_repeating(check_subscriptions, interval=86400, first=10)
 
-        web_app = web.Application()
-        web_app["telegram_bot"] = app
-        web_app.router.add_post("/api/send-alert", alert_handler)
-
-        logger.info("🚀 BoostIQ Bot iniciado con API de alertas")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.getenv("PORT", "8080")),
-            webhook_app=web_app,
-        )
+        logger.info("🚀 BoostIQ Bot iniciado con polling")
+        app.run_polling()
     except Exception as e:
         logger.error(f"Error crítico: {e}")
         print(f"❌ Error crítico: {e}")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
