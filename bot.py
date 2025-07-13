@@ -182,7 +182,7 @@ async def check_subscriptions(context: ContextTypes.DEFAULT_TYPE):
     for user_id, data in list(subscriptions.items()):
         end_date = datetime.fromisoformat(data["end_date"])
         if now > end_date:
-            del subscriptions[user_id]  # Desactivar expulsión automática temporalmente
+            del subscriptions[user_id]
             await context.bot.send_message(
                 OWNER_ID,
                 f"Usuario {user_id} con suscripción expirada ({data['plan']})."
