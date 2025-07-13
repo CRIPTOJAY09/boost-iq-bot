@@ -10,43 +10,37 @@ from telegram.ext import (
 from dotenv import load_dotenv
 import json
 
-# Configuración de logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Cargar variables de entorno
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID")) if os.getenv("OWNER_ID") else None
-BEP20_WALLET = os.getenv("BEP20_WALLET")
+BEP20_WALLET = os.getenv("WALLET_BEP20")
 USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
 
-# IDs de los grupos (para invitar y expulsar usuarios)
-GROUP_CHAT_IDS = {
-    "starter": os.getenv("GROUP_CHAT_ID_STARTER"),
-    "pro": os.getenv("GROUP_CHAT_ID_PRO"),
-    "ultimate": os.getenv("GROUP_CHAT_ID_ULTIMATE"),
+GROUP_LINKS = {
+    "starter": os.getenv("GROUP_LINK_STARTER"),
+    "pro": os.getenv("GROUP_LINK_PRO"),
+    "ultimate": os.getenv("GROUP_LINK_ULTIMATE"),
 }
 
-# Precios de los planes
 PLAN_PRICES = {
     "starter": 9.99,
     "pro": 19.99,
     "ultimate": 29.99
 }
 
-# Duración de los planes en días
 PLAN_DURATIONS = {
     "starter": 30,
     "pro": 90,
     "ultimate": 180
 }
 
-# Validar variables de entorno
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN no encontrado en las variables de entorno")
 if not BSCSCAN_API_KEY:
@@ -54,14 +48,12 @@ if not BSCSCAN_API_KEY:
 if not OWNER_ID:
     raise ValueError("OWNER_ID no encontrado en las variables de entorno")
 if not BEP20_WALLET:
-    raise ValueError("BEP20_WALLET no encontrado en las variables de entorno")
-if not all(GROUP_CHAT_IDS.values()):
-    raise ValueError("Faltan GROUP_CHAT_ID_STARTER, GROUP_CHAT_ID_PRO o GROUP_CHAT_ID_ULTIMATE")
+    raise ValueError("WALLET_BEP20 no encontrado en las variables de entorno")
+if not all(GROUP_LINKS.values()):
+    raise ValueError("Faltan GROUP_LINK_STARTER, GROUP_LINK_PRO o GROUP_LINK_ULTIMATE")
 
-# Archivo para almacenar suscripciones
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 
-# Cargar suscripciones desde archivo
 def load_subscriptions():
     try:
         with open(SUBSCRIPTIONS_FILE, "r") as f:
@@ -69,7 +61,6 @@ def load_subscriptions():
     except FileNotFoundError:
         return {}
 
-# Guardar suscripciones en archivo
 def save_subscriptions(subscriptions):
     with open(SUBSCRIPTIONS_FILE, "w") as f:
         json.dump(subscriptions, f, indent=2)
@@ -121,7 +112,6 @@ async def verify_payment(tx_hash: str, plan: str) -> bool:
         response = requests.get(url)
         data = response.json()
         if data.get("status") == "1":
-            # Verificar monto y dirección
             tx_details = f"https://api.bscscan.com/api?module=account&action=tokentx&contractaddress={USDT_CONTRACT}&address={BEP20_WALLET}&apikey={BSCSCAN_API_KEY}"
             tx_response = requests.get(tx_details)
             tx_data = tx_response.json()
@@ -129,7 +119,7 @@ async def verify_payment(tx_hash: str, plan: str) -> bool:
                 if tx["hash"] == tx_hash:
                     amount = float(tx["value"]) / 10**18
                     expected_amount = PLAN_PRICES.get(plan, 9.99)
-                    if abs(amount - expected_amount) < 0.01:  # Tolerancia para errores de redondeo
+                    if abs(amount - expected_amount) < 0.01:
                         return True
             return False
         return False
@@ -152,25 +142,16 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         save_subscriptions(subscriptions)
         
-        group_chat_id = GROUP_CHAT_IDS.get(plan)
-        try:
-            await context.bot.invite_chat_member(group_chat_id, user_id)
-            await update.message.reply_text(
-                f"¡Pago verificado! Has sido añadido al grupo {plan.capitalize()}."
-                if lang == "es" else
-                f"Payment verified! You have been added to the {plan.capitalize()} group."
-            )
-            await context.bot.send_message(
-                OWNER_ID,
-                f"Nueva suscripción: {update.message.from_user.username} ({plan.capitalize()})"
-            )
-        except Exception as e:
-            logger.error(f"Error invitando usuario {user_id}: {e}")
-            await update.message.reply_text(
-                "Pago verificado, pero hubo un error al añadirte al grupo. Contacta al soporte."
-                if lang == "es" else
-                "Payment verified, but there was an error adding you to the group. Contact support."
-            )
+        group_link = GROUP_LINKS.get(plan)
+        await update.message.reply_text(
+            f"¡Pago verificado! Únete al grupo: {group_link}"
+            if lang == "es" else
+            f"Payment verified! Join the group: {group_link}"
+        )
+        await context.bot.send_message(
+            OWNER_ID,
+            f"Nueva suscripción: {update.message.from_user.username} ({plan.capitalize()})"
+        )
     else:
         await update.message.reply_text(
             "Pago no válido. Verifica el hash o contacta al soporte."
@@ -201,33 +182,22 @@ async def check_subscriptions(context: ContextTypes.DEFAULT_TYPE):
     for user_id, data in list(subscriptions.items()):
         end_date = datetime.fromisoformat(data["end_date"])
         if now > end_date:
-            plan = data["plan"]
-            group_chat_id = GROUP_CHAT_IDS.get(plan)
-            try:
-                await context.bot.ban_chat_member(group_chat_id, user_id)
-                await context.bot.send_message(
-                    OWNER_ID,
-                    f"Usuario {user_id} expulsado por suscripción expirada ({plan})."
-                )
-                del subscriptions[user_id]
-            except Exception as e:
-                logger.error(f"Error expulsando usuario {user_id}: {e}")
+            del subscriptions[user_id]  # Desactivar expulsión automática temporalmente
+            await context.bot.send_message(
+                OWNER_ID,
+                f"Usuario {user_id} con suscripción expirada ({data['plan']})."
+            )
     save_subscriptions(subscriptions)
 
 def main():
     try:
         app = Application.builder().token(BOT_TOKEN).build()
-
-        # Handlers
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("status", status))
         app.add_handler(CallbackQueryHandler(select_language, pattern="lang_.*"))
         app.add_handler(CallbackQueryHandler(select_plan, pattern="plan_.*"))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_payment))
-
-        # Tarea programada para verificar suscripciones (cada 24 horas)
         app.job_queue.run_repeating(check_subscriptions, interval=86400, first=10)
-
         logger.info("🚀 BoostIQ Bot iniciado con polling")
         app.run_polling()
     except Exception as e:
